@@ -21,9 +21,10 @@
 const unsigned int ADDRESS_VOLUME = 8;  // EEPROM Adresse Lautstaerke
 const unsigned int ADDRESS_FREQUE = 64; // EEPROM Adresse letzte gesetzte Frequenz
 
-// Set the LCD address to 0x27 for a 16 chars and 2 line display
+// I2C Display, 4 Zeilen mit je 20 Zeichen
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
+// Muss noch implementiert werden, Speicherplaetze fuer die Sender
 struct Sender
 {
   float frequency;
