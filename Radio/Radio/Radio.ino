@@ -1,20 +1,40 @@
+#include <Wire.h>
+#include <extEEPROM.h>
+
 #include <SPI.h>
 #include <Wire.h> 
 #include <LiquidCrystal_I2C.h>
 #include "DigiPot.h"
 
 #define disp 6
-#define clk 2
-#define dt 3
-#define sw 4
+#define clk 2  //Rotary-Encoder 
+#define dt 3   //Rotary-Encoder
+#define sw 4   //Rotary-Encoder
 #define cs A0
 #define TEA5767_mute_left_right  0x06
 #define TEA5767_MUTE_FULL        0x80
 #define TEA5767_ADC_LEVEL_MASK   0xF0
 #define TEA5767_STEREO_MASK      0x80
+#define disk1 0x50    // Adresse des 24LC256 eeprom Speicherchips (Speichert Einstellungen)
+//Es werden die zuletzt gesetzte Frequenz und Lautstaerke gespeichert. 
+//Beim Start wird diese Einstellung verwendet
+const unsigned int ADDRESS_VOLUME = 8;  // EEPROM Adresse Lautstaerke
+const unsigned int ADDRESS_FREQUE = 64; // EEPROM Adresse letzte gesetzte Frequenz
 
 // Set the LCD address to 0x27 for a 16 chars and 2 line display
 LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+struct Sender
+{
+  float frequency;
+  float freqSaved01;
+  float freqSaved02;
+  float freqSaved03;
+  float freqSaved04;
+};
+typedef struct Sender SENDER;
+
+SENDER * frequencies;
 
 const int MODE_VOL = 1;
 const int MODE_FRQ = 2;
@@ -52,7 +72,20 @@ void loop()
   {
     dispOn = true;
   }
-
+  if (Serial.available() > 0)
+  {
+    String s = Serial.readString();
+    if (s.startsWith("UP"))
+    {
+      writeEEPROM(disk1, ADDRESS_VOLUME, Vol);
+      Serial.println(Vol);
+    } else if (s.startsWith("DOWN"))
+    {
+      Vol = readEEPROM(disk1, ADDRESS_VOLUME);
+      Serial.println(Vol);
+    } 
+  }
+  
   if (dispOn) //dispOn == Kommando
   {
     if (digitalRead(disp) == LOW) // Gegenwaertiger Status
@@ -163,8 +196,21 @@ void setVolume()
  SPI.transfer(B00010001);
  SPI.transfer(Vol);
  digitalWrite(cs, HIGH);
+ writeEEPROM(disk1, ADDRESS_VOLUME, Vol);
 }
 
+byte* floatToByteArray(float f) 
+{
+    byte* ret = malloc(4 * sizeof(byte));
+    unsigned int asInt = *((int*)&f);
+
+    int i;
+    for (i = 0; i < 4; i++) {
+        ret[i] = (asInt >> 8 * i) & 0xFF;
+    }
+
+    return ret;
+}
 
 void setup()
 {
@@ -181,14 +227,67 @@ void setup()
 	lcd.begin();
 	lcd.backlight();
   frequency = 99.00; //starting Frequency
-  Vol = 220; //starting Volume
+  Vol = readEEPROM(disk1, ADDRESS_VOLUME);
   attachInterrupt (0, isr0, FALLING);
   setFrequency();
   setVolume();
   TEA5767_read_data();
   arrow();
   DisplayData();
+  unsigned int address = 0;
 }
+
+void writeEEPROMFloat(int deviceaddress, unsigned int eeaddress, float data ) 
+{
+  data *= 100;
+  int tmpData = (int)(data);
+  Wire.beginTransmission(deviceaddress);
+  Wire.write((int)(eeaddress >> 8));   // MSB
+  Wire.write((int)(eeaddress & 0xFF)); // LSB
+  Wire.write(tmpData);
+  Wire.endTransmission();
+ 
+  delay(25);
+}
+ 
+
+void i2c_eeprom_write_page( int deviceaddress, unsigned int eeaddresspage) 
+{
+    Wire.beginTransmission(deviceaddress);
+    Wire.write((int)(eeaddresspage >> 8)); // MSB
+    Wire.write((int)(eeaddresspage & 0xFF)); // LSB
+    i2c_eeprom_write_page(deviceaddress, eeaddresspage, (byte *)frequencies, sizeof(SENDER));
+    Wire.endTransmission();
+    delay(25);
+}
+
+void writeEEPROM(int deviceaddress, unsigned int eeaddress, byte data ) 
+{
+  Wire.beginTransmission(deviceaddress);
+  Wire.write((int)(eeaddress >> 8));   // MSB
+  Wire.write((int)(eeaddress & 0xFF)); // LSB
+  Wire.write(data);
+  Wire.endTransmission();
+ 
+  delay(25);
+}
+ 
+byte readEEPROM(int deviceaddress, unsigned int eeaddress ) 
+{
+  byte rdata = 0xFF;
+ 
+  Wire.beginTransmission(deviceaddress);
+  Wire.write((int)(eeaddress >> 8));   // MSB
+  Wire.write((int)(eeaddress & 0xFF)); // LSB
+  Wire.endTransmission();
+ 
+  Wire.requestFrom(deviceaddress,1);
+ 
+  if (Wire.available()) rdata = Wire.read();
+ 
+  return rdata;
+}
+
 
 void DisplayData()
 {
@@ -245,6 +344,7 @@ void changeLevel()
     } 
   }
   setVolume();
+  
   DisplayData();
 }
 
@@ -295,5 +395,4 @@ void changeFreuency()
   TEA5767_read_data();
   DisplayData();
 }
-
 
