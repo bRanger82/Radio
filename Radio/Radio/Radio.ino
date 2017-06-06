@@ -25,6 +25,7 @@ const unsigned int ADDRESS_FREQUE = 64; // EEPROM Adresse letzte gesetzte Freque
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
 // Muss noch implementiert werden, Speicherplaetze fuer die Sender
+
 struct Sender
 {
   float frequency;
@@ -43,7 +44,7 @@ const int MODE_FRQ = 2;
 volatile boolean TurnDetected = false;
 volatile boolean up = false;
 volatile boolean dispOn = true;
-double frequency;
+float frequency;
 int mode;
 const long timeout = 15000;
 unsigned char frequencyH = 0;
@@ -189,6 +190,9 @@ void setFrequency()
   Wire.write(0x10);
   Wire.write((byte)0x00);
   Wire.endTransmission(); 
+  delay(50);
+  EEPROM_writeFloat(disk1, ADDRESS_FREQUE, frequency);
+  delay(50);
 } 
 
 void setVolume() 
@@ -227,7 +231,9 @@ void setup()
   Wire.begin();
 	lcd.begin();
 	lcd.backlight();
-  frequency = 99.00; //starting Frequency
+  frequency = 99.0;
+  //EEPROM_readFloat(disk1, ADDRESS_FREQUE, &frequency);
+  delay(50);
   Vol = readEEPROM(disk1, ADDRESS_VOLUME);
   attachInterrupt (0, isr0, FALLING);
   setFrequency();
@@ -236,6 +242,7 @@ void setup()
   arrow();
   DisplayData();
   unsigned int address = 0;
+  
 }
 
 void writeEEPROMFloat(int deviceaddress, unsigned int eeaddress, float data ) 
@@ -250,16 +257,79 @@ void writeEEPROMFloat(int deviceaddress, unsigned int eeaddress, float data )
  
   delay(25);
 }
- 
 
-void i2c_eeprom_write_page( int deviceaddress, unsigned int eeaddresspage) 
+// stored types
+union storedFloat {
+  float value;
+  byte bytes[FLOAT_LENGTH];
+};
+union storedDouble {
+  double value;
+  byte bytes[DOUBLE_LENGTH];
+};
+union storedUnsignedInt {
+  unsigned int value;
+  byte bytes[UINT_LENGTH];
+};
+
+int EEPROM_writeBytes(int address, byte bytes[], unsigned int writeLength, unsigned int eeaddress)
 {
-    Wire.beginTransmission(deviceaddress);
-    Wire.write((int)(eeaddresspage >> 8)); // MSB
-    Wire.write((int)(eeaddresspage & 0xFF)); // LSB
-    i2c_eeprom_write_page(deviceaddress, eeaddresspage, (byte *)frequencies, sizeof(SENDER));
-    Wire.endTransmission();
-    delay(25);
+  // save bytes
+  Wire.beginTransmission(address);
+  Wire.write((int)(eeaddress >> 8));   // MSB
+  Wire.write((int)(eeaddress & 0xFF)); // LSB
+  // send start address
+  Wire.write(address);
+
+  // send each byte
+  for(int i = 0; i < writeLength; i++)
+  {
+    Wire.write(bytes[i]);
+  }
+
+  return Wire.endTransmission();
+}
+
+int EEPROM_readBytes(int address, unsigned int readLength, unsigned int eeaddress)
+{
+  // indicate starting position
+  Wire.beginTransmission(address);
+  Wire.write((int)(eeaddress >> 8));   // MSB
+  Wire.write((int)(eeaddress & 0xFF)); // LSB
+  Wire.write(address);
+  Wire.endTransmission();
+
+  // request bytes
+  return Wire.requestFrom(address, readLength);
+}
+
+// EEPROM methods
+int EEPROM_writeFloat(int address, unsigned int eeaddress, float value)
+{
+  // cast value to union structure
+  union storedFloat s;
+  s.value = value;
+
+  // write bytes
+  return EEPROM_writeBytes(address, s.bytes, FLOAT_LENGTH, eeaddress);
+}
+
+void EEPROM_readFloat(int address, unsigned int eeaddress,float * value)
+{
+  // create structure
+  union storedFloat s;
+  
+  // capture bytes
+  int i = 0;
+  EEPROM_readBytes(address, FLOAT_LENGTH, eeaddress);
+  while(Wire.available())
+  {
+    s.bytes[i] = Wire.read();
+    i++;
+  }
+
+  // populate value
+  *value = s.value;
 }
 
 void writeEEPROM(int deviceaddress, unsigned int eeaddress, byte data ) 
