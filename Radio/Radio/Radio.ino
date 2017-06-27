@@ -1,53 +1,58 @@
 #include <SPI.h>
 #include <Wire.h> 
 #include <LiquidCrystal_I2C.h>
-#include "DigiPot.h"
+
+/* How many shift register chips are daisy-chained. */
+#define NUMBER_OF_SHIFT_CHIPS   1
+
+/* Width of data (how many ext lines). */
+#define DATA_WIDTH   NUMBER_OF_SHIFT_CHIPS * 8
+
+/* Width of pulse to trigger the shift register to read and latch. */
+#define PULSE_WIDTH_USEC   5
+
+/* Optional delay between shift register reads. */
+#define POLL_DELAY_MSEC   250
+
+/* You will need to change the "int" to "long" If the
+ * NUMBER_OF_SHIFT_CHIPS is higher than 2.
+*/
+#define BYTES_VAL_T unsigned int
+
+#define cs             A0
+#define ploadPin        3  // Connects to Parallel load pin the 165
+#define clockPin        4  // Connects to the Clock pin the 165
+#define dataPin         5  // Connects to the Q7 pin the 165
+#define disp            6
+#define clockEnablePin 10  // Connects to Clock Enable pin the 165
+
+BYTES_VAL_T pinValues;
+BYTES_VAL_T oldPinValues;
 
 #define FLOAT_LENGTH 4
 #define DOUBLE_LENGTH 8
 #define UINT_LENGTH 2
 
-#define disp 6
-#define clk 2
-#define dt 3
-#define sw 4
-#define cs A0
+
 #define TEA5767_mute_left_right  0x06
 #define TEA5767_MUTE_FULL        0x80
 #define TEA5767_ADC_LEVEL_MASK   0xF0
 #define TEA5767_STEREO_MASK      0x80
-#define disk1 0x50    //Address of 24LC256 eeprom chip
+#define disk1 0x50               //Address of 24LC256 eeprom chip
 const unsigned int ADDRESS_VOLUME = 8;
 const unsigned int ADDRESS_FREQUE = 64;
 
-// I2C Display, 4 Zeilen je 20 Zeichen
+// Set the LCD address to 0x27 for a 16 chars and 2 line display
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
-struct Sender
-{
-  float frequency;
-  float freqSaved01;
-  float freqSaved02;
-  float freqSaved03;
-  float freqSaved04;
-};
-typedef struct Sender SENDER;
 
-SENDER * frequencies;
-
-const int MODE_VOL = 1;
-const int MODE_FRQ = 2;
-
-volatile boolean TurnDetected = false;
-volatile boolean up = false;
-volatile boolean dispOn = true;
+boolean dispOn = true;
 float frequency = 99.0;
-int mode;
 const long timeout = 15000;
 unsigned char frequencyH = 0;
 unsigned char frequencyL = 0;
 unsigned int frequencyB;
-byte Vol;
+byte Vol = 230;
 
 volatile long tmr_lmt = 15000;
 volatile long tmr_lst = millis();
@@ -61,29 +66,86 @@ byte mute=0;
 byte old_signal_level=1;
 byte signal_level=0;
 
+void checkSerialinput()
+{
+  if (Serial.available() > 0)
+  {
+    dispOn = true;
+    tmr_lst = millis();
+    String s = Serial.readString();
+    if (s.startsWith("UP"))
+    {
+      changeLevel(true);
+    } else if (s.startsWith("DOWN"))
+    {
+      changeLevel(false);
+    } else if (s.startsWith("FUP"))
+    {
+      changeFreuency(true);
+    } else if (s.startsWith("FDOWN"))
+    {
+      changeFreuency(false);
+    } else if (s.startsWith("OE3"))
+    {
+      frequency = 98.9;
+      changeFreuency(true);
+    } else if (s.startsWith("WELLE1"))
+    {
+      frequency = 101.7;
+      changeFreuency(true);
+    }
+    Serial.print("START|");
+    Serial.print("FREQ|");
+    Serial.print(frequency);
+    Serial.print("|VOL|");
+    Serial.print(Vol);
+    Serial.println("|EOF");
+  }
+}
+
+float round_to_dp( float in_value, int decimal_place )
+{
+  float multiplier = powf( 10.0f, decimal_place );
+  in_value = roundf( in_value * multiplier ) / multiplier;
+  return in_value;
+}
 
 void loop()
 { 
   if (millis() > (tmr_lst + tmr_lmt))
   {
+    if (dispOn)
+    {
+      /*
+       * Every time the display turns off 
+       * check if a value was changed
+       * If yes save it to eeprom
+       * This should avoid writing to eeprom too many (unnecessary) times
+      */
+      float tmpFreq = EEPROM_readFloat(disk1, ADDRESS_FREQUE);
+      byte tmpVol  = readEEPROM(disk1, ADDRESS_VOLUME);
+
+      if (round_to_dp(frequency, 2) != round_to_dp(tmpFreq, 2) || tmpVol != Vol)
+      {
+        Serial.print("freq: ");
+        Serial.print(frequency);
+        Serial.print(" - freq-tmp: ");
+        Serial.print(tmpFreq);
+        Serial.print(" ::: Vol: ");
+        Serial.print(Vol);
+        Serial.print(" - Vol_tmp: ");
+        Serial.println(tmpVol);
+        Serial.println("Save to EEPROM called!");
+        saveToEEPROM();
+      }
+    }
     dispOn = false;
   } else
   {
     dispOn = true;
   }
-  if (Serial.available() > 0)
-  {
-    String s = Serial.readString();
-    if (s.startsWith("UP"))
-    {
-      writeEEPROM(disk1, ADDRESS_VOLUME, Vol);
-      Serial.println(Vol);
-    } else if (s.startsWith("DOWN"))
-    {
-      Vol = readEEPROM(disk1, ADDRESS_VOLUME);
-      Serial.println(Vol);
-    } 
-  }
+
+  checkSerialinput();
   
   if (dispOn) //dispOn == Kommando
   {
@@ -105,74 +167,19 @@ void loop()
     }
   }
   
-  if (digitalRead(sw) == LOW)
-  {
-    changeToNextMode();
-    while(digitalRead(sw) == LOW)
-    {
-      // wait for release
-    }
-    arrow();
-    DisplayData();
-  }
-  
-  if (TurnDetected)
-  {
-    if (mode == MODE_FRQ)
-    {
-      changeFreuency();
-    } else if (mode == MODE_VOL)
-    {
-      changeLevel();
-    }
-    TurnDetected = false;
-  }
-}
+  /* Read the state of all zones. */
+  pinValues = read_shift_regs();
 
-void changeMode(int newMode = 0)
-{
-  switch(newMode)
+  /* If there was a chage in state, display which ones changed. */
+  if(pinValues != oldPinValues)
   {
-    case 0: changeMode(MODE_VOL); break;
-    case 1: mode = MODE_VOL; break;
-    case 2: mode = MODE_FRQ; break;
-    default: break;
+      display_pin_values();
+      oldPinValues = pinValues;
+      dispOn = true;
+      tmr_lst = millis();
   }
-}
 
-void changeToNextMode()
-{
-  if (mode == MODE_VOL)
-  {
-    changeMode(MODE_FRQ);
-  } else if (mode == MODE_FRQ)
-  {
-    changeMode(MODE_VOL);
-  }
-}
-
-void arrow()
-{
-  if (mode == MODE_FRQ)
-  {
-   lcd.setCursor(0,3);
-   lcd.print(">");
-   lcd.setCursor(0,2);
-   lcd.print(" ");
-  } else if (mode == MODE_VOL)
-  {
-   lcd.setCursor(0,2);
-   lcd.print(">");
-   lcd.setCursor(0,3);
-   lcd.print(" ");
-  } 
-}
-
-void isr0 ()  
-{
-  tmr_lst = millis();
-  TurnDetected = true;
-  up = (digitalRead(clk) == digitalRead(dt));
+  delay(POLL_DELAY_MSEC);
 }
 
 void setFrequency()  
@@ -188,9 +195,15 @@ void setFrequency()
   Wire.write((byte)0x00);
   Wire.endTransmission(); 
   delay(50);
+} 
+
+void saveToEEPROM()
+{
+  writeEEPROM(disk1, ADDRESS_VOLUME, Vol);
+  delay(50);
   EEPROM_writeFloat(disk1, ADDRESS_FREQUE, frequency);
   delay(50);
-} 
+}
 
 void setVolume() 
 {
@@ -198,7 +211,7 @@ void setVolume()
  SPI.transfer(B00010001);
  SPI.transfer(Vol);
  digitalWrite(cs, HIGH);
- writeEEPROM(disk1, ADDRESS_VOLUME, Vol);
+ delay(50);
 }
 
 byte* floatToByteArray(float f) 
@@ -216,43 +229,113 @@ byte* floatToByteArray(float f)
 
 void setup()
 {
+  
   Serial.begin(9600);
-  pinMode(cs,OUTPUT);
-  pinMode(clk,INPUT);
-  pinMode(dt,INPUT);  
-  pinMode(sw,INPUT);
-  pinMode(disp, OUTPUT);
-  digitalWrite(disp, LOW);
-  mode = MODE_VOL;
   SPI.begin();
   Wire.begin();
+
+  /* Initialize our digital pins... */
+  pinMode(cs,OUTPUT);
+  pinMode(disp, OUTPUT);
+  digitalWrite(disp, LOW);
+  pinMode(ploadPin, OUTPUT);
+  pinMode(clockEnablePin, OUTPUT);
+  pinMode(clockPin, OUTPUT);
+  pinMode(dataPin, INPUT);
+
+  digitalWrite(clockPin, LOW);
+  digitalWrite(ploadPin, HIGH);
+
+  /* Read in and display the pin states at startup. */
+  pinValues = read_shift_regs();
+  oldPinValues = pinValues;
+    
 	lcd.begin();
 	lcd.backlight();
-  delay(50);
-  EEPROM_readFloat(disk1, ADDRESS_FREQUE, &frequency);
-  if (frequency < 87.6 | frequency > 108.0)
-  {
-    Serial.print("readFloat for Frequency out of range, read: ");
-    Serial.println(frequency);
-    frequency = 99.0;
-  } else
-  {
-    Serial.print("set Frequency to: ");
-    Serial.println(frequency);
-  }
-  delay(50);
+  
+  frequency = EEPROM_readFloat(disk1, ADDRESS_FREQUE);
   Vol = readEEPROM(disk1, ADDRESS_VOLUME);
-  attachInterrupt (0, isr0, FALLING);
+  
+  if (frequency < 87.6 || frequency > 108.0)
+  {
+    frequency = 99.0; //default/fall-back
+  }
+  if (Vol < 1 || Vol > 255)
+  {
+    Vol = 230; //default/fall-back
+  }
   setFrequency();
   setVolume();
   TEA5767_read_data();
-  arrow();
   DisplayData();
-  unsigned int address = 0;
-  
 }
 
 
+/* This function is essentially a "shift-in" routine reading the
+ * serial Data from the shift register chips and representing
+ * the state of those pins in an unsigned integer (or long).
+*/
+BYTES_VAL_T read_shift_regs()
+{
+    long bitVal;
+    BYTES_VAL_T bytesVal = 0;
+
+    /* Trigger a parallel Load to latch the state of the data lines,
+    */
+    digitalWrite(clockEnablePin, HIGH);
+    digitalWrite(ploadPin, LOW);
+    delayMicroseconds(PULSE_WIDTH_USEC);
+    digitalWrite(ploadPin, HIGH);
+    digitalWrite(clockEnablePin, LOW);
+
+    /* Loop to read each bit value from the serial out line
+     * of the SN74HC165N.
+    */
+    for(int i = 0; i < DATA_WIDTH; i++)
+    {
+        bitVal = digitalRead(dataPin);
+
+        /* Set the corresponding bit in bytesVal.
+        */
+        bytesVal |= (bitVal << ((DATA_WIDTH-1) - i));
+
+        /* Pulse the Clock (rising edge shifts the next bit).
+        */
+        digitalWrite(clockPin, HIGH);
+        delayMicroseconds(PULSE_WIDTH_USEC);
+        digitalWrite(clockPin, LOW);
+    }
+
+    return(bytesVal);
+}
+
+/* Dump the list of zones along with their current status.
+*/
+void display_pin_values()
+{
+
+    for(int i = 0; i < DATA_WIDTH; i++)
+    {
+      if((pinValues >> i) & 1) 
+      {
+        // I am high, do nothing  
+      } else
+      {
+        switch(i)
+        {
+          case 0: break;
+          case 1: frequency = (float)106.4; commitFrequency();break;
+          case 2: frequency = (float)101.2; commitFrequency(); break;
+          case 3: frequency = (float)99.0; commitFrequency(); break;
+          case 4: changeLevel(true); break;
+          case 5: changeLevel(false); break;
+          case 6: changeFreuency(true); break;
+          case 7: changeFreuency(false); break;
+          default: Serial.println("Unknown Data Pin");
+        }
+      }
+    }
+}
 
 // stored types
 union storedFloat {
@@ -312,21 +395,12 @@ void EEPROM_writeFloat(int address, unsigned int eeaddress, float value)
   // cast value to union structure
   union storedFloat s;
   s.value = value;
-
-  // write bytes
   EEPROM_writeBytes(address, s.bytes, FLOAT_LENGTH, eeaddress);
 }
 
-float EEPROM_readFloat(int address, unsigned int eeaddress,float * value)
+float EEPROM_readFloat(int address, unsigned int eeaddress)
 {
-  
-  
-  // capture bytes
-  
-  float f = EEPROM_readBytes(address, FLOAT_LENGTH, eeaddress);
-  
-  *value = f;
-  return f;
+  return EEPROM_readBytes(address, FLOAT_LENGTH, eeaddress);
 }
 
 void writeEEPROM(int deviceaddress, unsigned int eeaddress, byte data ) 
@@ -373,13 +447,6 @@ void DisplayData()
   lcd.setCursor(0, 1);
   lcd.print("                    ");
   lcd.setCursor(0, 1);
-  if (mode)
-  {
-    lcd.print("Mode ist TRUE");   
-  } else
-  {
-    lcd.print("Mode ist FALSCH");
-  }
   lcd.setCursor(1,2);
   lcd.print("                   ");
   lcd.setCursor(1,2);
@@ -394,7 +461,7 @@ void DisplayData()
   lcd.print(" MHz");  
 }
 
-void changeLevel()
+void changeLevel(bool up)
 {
   if(up)
   {
@@ -411,8 +478,8 @@ void changeLevel()
       Vol = 255;
     } 
   }
+
   setVolume();
-  
   DisplayData();
 }
 
@@ -444,7 +511,15 @@ String value_to_string(int value)
   return value_string;
 }
 
-void changeFreuency()
+void commitFrequency()
+{
+  setFrequency();
+  TEA5767_read_data();
+  DisplayData();  
+}
+
+  
+void changeFreuency(bool up)
 {
   if(up)
   {
@@ -459,8 +534,7 @@ void changeFreuency()
       frequency = frequency - 0.1;
     }
   }
-  setFrequency();
-  TEA5767_read_data();
-  DisplayData();
+
+  commitFrequency();
 }
 
